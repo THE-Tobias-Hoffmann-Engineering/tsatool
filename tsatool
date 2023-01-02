@@ -1,0 +1,266 @@
+#!/bin/sh
+
+TSA_URL=""
+CAPATH="."
+DIGEST="sha384"
+SUFFIX=".tsalog"
+
+case "$1" in
+  "init")
+    shift
+    ARGS=$(getopt "f" $*) && OP=init
+    ;;
+  "verify")
+    shift
+    ARGS=$(getopt "a" $*) && OP=verify
+    ;;
+  "")
+    ARGS=
+    ;;
+  *)
+    ARGS=$(getopt "" $*) && OP=update
+    ;;
+esac
+set -- $ARGS
+
+opt_all=
+opt_force=
+opt_verbose=   # TODO?!
+while :; do
+  case "$1" in
+    -a) opt_all=1; shift ;;
+    -f) opt_force=1; shift ;;
+    --) shift; break ;;
+  esac
+done
+
+if [ -z "$OP" ]; then
+  echo "Usage: $0 init [-f] NEW_FILENAME..."
+  echo "          FILENAME..."
+  echo "          verify [-a] FILENAME..."
+  exit
+fi
+
+# returns 0/1, RET=size
+_size() { # filename
+  RET=$(wc -c "$1" | { read len more; echo $len; })
+}
+
+# RET=digest
+_digest() { # filename [limit=]
+  if [ -n "$2" ]; then
+    RET=$(head -c "$2" "$1" | openssl $DIGEST -r | cut -d' ' -f1)
+    return
+  fi
+  RET=$(openssl $DIGEST -r < "$1" | cut -d' ' -f1)
+}
+
+# returns 0/1, RET=signedTimestamp(base64)
+_obtain_ts() { # digestOfData
+  local TMPFILE
+  TMPFILE=$(mktemp) || return
+  openssl ts -query "-$DIGEST" -digest "$1" -no_nonce -out "$TMPFILE" || { rm "$TMPFILE"; return 1; }
+  curl -s -S -H 'Content-type: application/timestamp-query' --data-binary "@$TMPFILE" "$TSA_URL" -o "$TMPFILE" || { rm "$TMPFILE"; return 1; }
+  openssl ts -reply -in "$TMPFILE" -out "$TMPFILE" || { rm "$TMPFILE"; return 1; }
+  RET=$(openssl base64 -A -in "$TMPFILE")
+  rm "$TMPFILE"
+}
+
+# returns 0/1, RET=signing time (UTCTIME ... / GENERALTIME ...)
+_verify_ts() { # signedTimestamp(base64) digestOfData
+     # FIXME: obtain signing time, print signing-cert name (when missing), get rid of /dev/stdin ?
+  #echo "$1" | openssl base64 -A -d | openssl ts -verify -digest "$2" -token_in  -in /dev/stdin -CApath "$CAPATH" -untrusted tsa.crt
+  :
+}
+
+# returns 0/1
+_read_tsalog() { # filename callbackFn [allowEmpty=]    w/ invocations: callbackFn $pos $hash $signedTimestamp(base64)
+  local file=$1 cb=$2 allowEmpty=$3
+  local pos hash sts found=
+  while read -r pos hash sts; do
+    if [ -z "$pos" ] || [ "$pos" -lt "0" ] || [ -z "$hash" ] || [ -z "$sts" ]; then
+      echo "Read error: $file$SUFFIX contains bad record: \"$pos\", \"$hash\", \"$sts\"" >&2
+      return 1
+    fi
+    "$cb" "$pos" "$hash" "$sts" || return
+    found=1
+  done < "$1$SUFFIX"
+
+  if [ -z "$found" ]; then
+    if [ -z "$allowEmpty" ]; then
+      echo "Read error: $file$SUFFIX contains no entries" >&2
+      return 1
+    else
+      "$cb" "" "" "" || return
+    fi
+  fi
+}
+
+# returns 0/1
+_append_tsalog() { # filename pos hash signedTimestamp(base64)
+  local file=$1 pos=$2 hash=$3 sts=$4
+  if [ -z "$pos" ] || [ "$pos" -lt "0" ] || [ -z "$hash" ] || [ -z "$sts" ]; then
+    echo "Write error: bad record not written: \"$pos\", \"$hash\", \"$sts\"" >&2
+    return 1
+  elif [ -z "$file" ]; then
+    echo "Write error: missing filename" >&2
+    return 1
+  fi
+
+  echo "$pos $hash $sts" >> "$file$SUFFIX"
+  if [ $? -ne 0 ]; then
+    echo "Write error: $file$SUFFIX" 2>&1
+    return 1
+  fi
+}
+
+last_pos=
+last_hash=
+last_sts=
+_cb_get_last() { # pos hash sts
+  last_pos=$1
+  last_hash=$2
+  last_sts=$3
+}
+
+#_cb_verify_all() { ...} # TODO
+
+# returns 0/2...
+_init() { # filename
+  local file=$1
+
+  echo -n >> "$file"
+  echo -n >> "$file$SUFFIX"
+  _update "$file" 1
+}
+
+# returns 0/2...
+_update() { # filename [internalInit=]
+  local file=$1 internalInit=$2
+  local new_size new_hash
+  local last_pos last_hash last_sts
+  local old_hash
+
+  # 1. get size and compute complete hash of "$file"
+  _size "$file" || return
+  new_size=$RET
+
+  _digest "$file" || return
+  new_hash=$RET
+
+  # safety check
+  _size "$file" || return
+  if [ "$RET" -ne "$new_size" ]; then
+    echo "ERROR: unexpected size change of $file" >&2
+    return 1
+  fi
+  [ -n "$opt_verbose" ] && echo "new size: $new_size, new_hash: $new_hash"
+
+  # 2. load last record from "$file$SUFFIX"
+  _read_tsalog "$file" _cb_get_last "$internalInit" || return
+  # _cb_get_last has populated $last_pos, $last_hash and $last_sts
+  [ -n "$opt_verbose" ] && echo "last_pos: $last_pos, last_hash: $last_hash, last_sts: $last_sts"
+
+  # 3. when unchanged, done
+  if [ "$last_hash" = "$new_hash" ] && [ "$last_pos" -eq "$new_size" ]; then
+    echo "$file unchanged"
+    return 0
+  fi
+
+  if [ -n "$last_pos" ]; then  # i.e. not during initialInit
+    # 4. compute partial hash (until $last_pos) of "$file"
+    _digest "$file" "$last_pos" || return
+    old_hash=$RET
+
+    # 5. verify integrity against stored last_hash
+    if [ "$old_hash" != "$last_hash" ]; then
+      echo "CORRUPT: $1 stored hash \"$last_hash\" does not match hash up to $last_pos: $old_hash" >&2
+      return 1
+    fi
+  elif [ -z "$internalInit" ]; then
+    echo "BUG" >&2
+  fi
+
+  # 6. obtain timestamp for $new_hash
+#  _obtain "$new_hash" || return
+#  new_sts=$RET
+
+  # 7. verify timestamp "$new_sts" matches "$new_hash" (+ all certs present? || WARN)  || FAIL
+# ...
+
+  # 8. append to log
+  _append_tsalog "$file" "$new_size" "$new_hash" "$new_sts" || return
+
+  echo "$file: processed"
+}
+
+# returns 0/2...
+_verify() { # filename
+  local file=$1
+
+  :   # FIXME TODO
+}
+
+case $OP in
+  init)
+    error=
+    for file; do
+      if [ -e "$file" ]; then
+        if [ -z "$opt_force" ]; then
+          echo "$file already exists" >&2
+          error=1
+        fi
+      elif [ -e "$file$SUFFIX" ]; then
+        echo "$file$SUFFIX already exists" >&2
+      fi
+    done
+
+    if [ -n "$error" ]; then
+      echo "Aborting." >&2
+      exit $error
+    fi
+
+    error=
+    for file; do
+      _init "$file" || error=1
+    done
+    exit $error
+    ;;
+
+  update)
+    error=
+    for file; do
+      if [ ! -f "$file" ]; then
+        echo "SKIP: $file does not exist" >&2
+        error=1
+        continue
+      elif [ ! -f "$file$SUFFIX" ]; then
+        echo "SKIP: $file$SUFFIX does not exist (not initialized?)" >&2
+        error=1
+        continue
+      fi
+
+      _update "$file" || error=1
+    done
+    exit $error
+    ;;
+
+  verify)
+    error=
+    for file; do
+      if [ ! -f "$file" ]; then
+        echo "ERROR: $file does not exist" >&2
+        error=1
+        continue
+      elif [ ! -f "$file$SUFFIX" ]; then
+        echo "ERROR: $file$SUFFIX does not exist" >&2
+        error=1
+        continue
+      fi
+
+      _verify "$file" || exit
+    done
+    exit $error
+    ;;
+esac
+
