@@ -1,24 +1,24 @@
 #!/bin/sh
 
 TSA_URL=""
-CAPATH="."
+CERTFILE="tsa-certificates.crt"
 DIGEST="sha384"
 SUFFIX=".tsalog"
 
 case "$1" in
   "init")
     shift
-    ARGS=$(getopt "f" $*) && OP=init
+    ARGS=$(getopt "fh" $*) && OP=init
     ;;
   "verify")
     shift
-    ARGS=$(getopt "a" $*) && OP=verify
+    ARGS=$(getopt "ah" $*) && OP=verify
     ;;
   "")
-    ARGS=
+    ARGS=--
     ;;
   *)
-    ARGS=$(getopt "" $*) && OP=update
+    ARGS=$(getopt "h" $*) && OP=update
     ;;
 esac
 set -- $ARGS
@@ -30,47 +30,145 @@ while :; do
   case "$1" in
     -a) opt_all=1; shift ;;
     -f) opt_force=1; shift ;;
+    -h) OP=; shift; break ;;
     --) shift; break ;;
   esac
 done
 
 if [ -z "$OP" ]; then
-  echo "Usage: $0 init [-f] NEW_FILENAME..."
-  echo "          FILENAME..."
-  echo "          verify [-a] FILENAME..."
+  cat << EOT
+Usage: $0 ...
+          init [-f] NEW_FILENAME...
+          FILENAME...
+          verify [-a] FILENAME...
+EOT
   exit
 fi
 
+_join_path() { # path0 path1
+  case "$2" in
+    /*) printf "%s\n" "$2" ;;
+    *) printf "%s/%s\n" "$1" "$2" ;;
+  esac
+}
+
 # returns 0/1, RET=size
 _size() { # filename
-  RET=$(wc -c "$1" | { read len more; echo $len; })
+  RET=$(wc -c "$1" | { read len more; echo $len; })   # trick: strip leading whitespace
+}
+
+_head() { # file limit
+  # some implementations don't like 0
+  [ "$2" -eq 0 ] && return
+  head -c "$2" "$1"
 }
 
 # RET=digest
 _digest() { # filename [limit=]
   if [ -n "$2" ]; then
-    RET=$(head -c "$2" "$1" | openssl $DIGEST -r | cut -d' ' -f1)
+    RET=$(_head "$1" "$2" | openssl "$DIGEST" -r | cut -d' ' -f1)
     return
   fi
-  RET=$(openssl $DIGEST -r < "$1" | cut -d' ' -f1)
+  RET=$(openssl "$DIGEST" -r < "$1" | cut -d' ' -f1)
 }
 
 # returns 0/1, RET=signedTimestamp(base64)
 _obtain_ts() { # digestOfData
-  local TMPFILE
-  TMPFILE=$(mktemp) || return
-  openssl ts -query "-$DIGEST" -digest "$1" -no_nonce -out "$TMPFILE" || { rm "$TMPFILE"; return 1; }
-  curl -s -S -H 'Content-type: application/timestamp-query' --data-binary "@$TMPFILE" "$TSA_URL" -o "$TMPFILE" || { rm "$TMPFILE"; return 1; }
-  openssl ts -reply -in "$TMPFILE" -out "$TMPFILE" || { rm "$TMPFILE"; return 1; }
-  RET=$(openssl base64 -A -in "$TMPFILE")
-  rm "$TMPFILE"
+  local tempfile
+  tempfile=$(mktemp) || return
+  openssl ts -query "-$DIGEST" -digest "$1" -no_nonce -out "$tempfile" || { rm "$tempfile"; return 1; }
+  curl -s -S -H 'Content-type: application/timestamp-query' --data-binary "@$tempfile" "$TSA_URL" -o "$tempfile" || { rm "$tempfile"; return 1; }
+  openssl ts -reply -in "$tempfile" -token_out -out "$tempfile" || { rm "$tempfile"; return 1; }
+  RET=$(openssl base64 -A -in "$tempfile")
+  rm "$tempfile"
 }
 
-# returns 0/1, RET=signing time (UTCTIME ... / GENERALTIME ...)
-_verify_ts() { # signedTimestamp(base64) digestOfData
-     # FIXME: obtain signing time, print signing-cert name (when missing), get rid of /dev/stdin ?
-  #echo "$1" | openssl base64 -A -d | openssl ts -verify -digest "$2" -token_in  -in /dev/stdin -CApath "$CAPATH" -untrusted tsa.crt
-  :
+# Expects all timestamps from this TSA_URL to use the same certificates...
+_do_fetch_ts_certs() { # dstfile
+  local dstfile=$1
+  # obtain "empty" timestamp, but with included certs
+  printf "" | openssl ts -query "-$DIGEST" -cert -no_nonce -out "$dstfile" || return
+  curl -s -S -H 'Content-type: application/timestamp-query' --data-binary "@$dstfile" "$TSA_URL" -o "$dstfile" || return
+  openssl ts -reply -in "$dstfile" -token_out -out "$dstfile" || return
+  openssl pkcs7 -inform DER -in "$dstfile" -print_certs -out "$dstfile" || return
+}
+
+_fetch_append_ts_certs() { # certfile
+  local certfile=$1
+  local tempfile rc
+  tempfile=$(mktemp) || return
+  _do_fetch_ts_certs "$tempfile"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    cat "$tempfile" >> "$certfile"
+  fi
+  rm "$tempfile"
+  return $rc
+}
+
+_get_tsr_info() { # signedTimestamp(base64) dstfile errfile
+  local sts=$1 dstfile=$2 errfile=$3
+  echo "$sts" | openssl base64 -A -d -out "$dstfile" || return
+  openssl ts -reply -token_in -in "$dstfile" -text -out "$dstfile" 2> "$errfile"
+}
+
+# returns 0/1, RET=output
+_verify_ts() { # signedTimestamp(base64) datafile certfile tempdir [limit=]
+  local sts=$1 file=$2 certfile=$3 tempdir=$4 limit=$5
+
+  echo "$sts" | openssl base64 -A -d -out "$tempdir/in" || return
+
+  if [ -n "$limit" ]; then
+    _digest "$file" "$limit" || return
+    RET=$(openssl ts -verify -digest "$RET" -token_in -in "$tempdir/in" -CAfile "$certfile" -untrusted "$certfile" 2> "$tempdir/err")
+    rc=$?
+  else
+    RET=$(openssl ts -verify -data "$file" -token_in -in "$tempdir/in" -CAfile "$certfile" -untrusted "$certfile" 2> "$tempdir/err")
+    rc=$?
+  fi
+  grep -v "^Using configuration from" "$tempdir/err" >&2
+
+  return $rc
+}
+
+# NOTE: prints used openssl command, but does not support limit=
+_verify_ts_audit() { # signedTimestamp(base64) filename certfile
+  local sts=$1 file=$2 certfile=$3
+  echo "echo \"$sts\" | openssl base64 -A -d | openssl ts -verify -data \"$file\" -token_in -in /dev/stdin -CAfile \"$certfile\" -untrusted \"$certfile\""
+  echo "$sts" | openssl base64 -A -d | openssl ts -verify -data "$file" -token_in -in /dev/stdin -CAfile "$certfile" -untrusted "$certfile"
+}
+
+# verify the certificate and return defined error codes:
+err_verify_0="success"
+err_verify_1="general processing error"   # e.g. could not create temporary file
+err_verify_2="unknown error"
+err_verify_3="certfile missing/empty"
+err_verify_4="signer certificate not found"
+err_verify_5="unable to get local issuer certificate"
+err_verify_6="digest does not match"
+
+_do_try_verify_ts() { # signedTimestamp(base64) digestOfData certfile tempdir
+  local sts=$1 hash=$2 certfile=$3 tempdir=$4
+  echo "$sts" | openssl base64 -A -d -out "$tempdir/in" || return 1
+  RET=$(openssl ts -verify -digest "$hash" -token_in -in "$tempdir/in" -CAfile "$certfile" -untrusted "$certfile" 2> "$tempdir/err") && return 0
+  grep -q "^Error loading file " "$tempdir/err" && return 3
+  grep -q "no certificate or crl found" "$tempdir/err" && return 3
+  grep -q "signer certificate not found" "$tempdir/err" && return 4
+  grep -q "unable to get local issuer certificate" "$tempdir/err" && return 5
+  grep -q "message imprint mismatch" "$tempdir/err" && return 6
+  cat "$tempdir/err" >&2
+  return 2
+}
+
+_try_verify_ts() { # signedTimestamp(base64) digestOfData certfile
+  local tempdir rc
+  [ ! -f "$certfile" ] && return 3
+
+  tempdir=$(mktemp -d) || return 1
+  _do_try_verify_ts "$1" "$2" "$3" "$tempdir"
+  rc=$?
+  rm -r "$tempdir"
+  return $rc
 }
 
 # returns 0/1
@@ -107,7 +205,7 @@ _append_tsalog() { # filename pos hash signedTimestamp(base64)
     return 1
   fi
 
-  echo "$pos $hash $sts" >> "$file$SUFFIX"
+  printf "%u %s %s\n" "$pos" "$hash" "$sts" >> "$file$SUFFIX"
   if [ $? -ne 0 ]; then
     echo "Write error: $file$SUFFIX" 2>&1
     return 1
@@ -123,14 +221,30 @@ _cb_get_last() { # pos hash sts
   last_sts=$3
 }
 
-#_cb_verify_all() { ...} # TODO
+_cb_verify_all() { # pos hash sts   (global: file certfile tempdir)
+  local pos=$1 hash=$2 sts=$3
+  last_pos=$pos   # store for final append check
+
+  printf "  %s: " "$pos"
+
+#  _verify_ts "$sts" "$file" "$certfile" "$tempdir" "$pos" || return
+  _digest "$file" "$pos" || return
+  if _do_try_verify_ts "$sts" "$RET" "$certfile" "$tempdir"; then :; else
+    eval echo "FAIL: \$err_verify_$?"
+    return 1
+  fi
+
+#  _get_tsr_info "$sts" "$tempdir/out" "$tempdir/err" || return
+  openssl ts -reply -token_in -in "$tempdir/in" -text -out "$tempdir/in" 2> "$tempdir/err"
+  grep "^Time stamp: " "$tempdir/in"
+}
 
 # returns 0/2...
 _init() { # filename
   local file=$1
 
-  echo -n >> "$file"
-  echo -n >> "$file$SUFFIX"
+  printf "" >> "$file"
+  printf "" >> "$file$SUFFIX"
   _update "$file" 1
 }
 
@@ -140,6 +254,7 @@ _update() { # filename [internalInit=]
   local new_size new_hash
   local last_pos last_hash last_sts
   local old_hash
+  local certfile=$(_join_path "$(dirname -- "$file")" "$CERTFILE")
 
   # 1. get size and compute complete hash of "$file"
   _size "$file" || return
@@ -163,7 +278,7 @@ _update() { # filename [internalInit=]
 
   # 3. when unchanged, done
   if [ "$last_hash" = "$new_hash" ] && [ "$last_pos" -eq "$new_size" ]; then
-    echo "$file unchanged"
+    echo "DONE: $file unchanged"
     return 0
   fi
 
@@ -174,7 +289,7 @@ _update() { # filename [internalInit=]
 
     # 5. verify integrity against stored last_hash
     if [ "$old_hash" != "$last_hash" ]; then
-      echo "CORRUPT: $1 stored hash \"$last_hash\" does not match hash up to $last_pos: $old_hash" >&2
+      echo "CORRUPT: $file stored hash \"$last_hash\" does not match hash up to $last_pos: $old_hash" >&2
       return 1
     fi
   elif [ -z "$internalInit" ]; then
@@ -182,23 +297,95 @@ _update() { # filename [internalInit=]
   fi
 
   # 6. obtain timestamp for $new_hash
-#  _obtain "$new_hash" || return
-#  new_sts=$RET
+  _obtain_ts "$new_hash" || return
+  new_sts=$RET
 
-  # 7. verify timestamp "$new_sts" matches "$new_hash" (+ all certs present? || WARN)  || FAIL
-# ...
+  # 7a. try to verify timestamp against our certificate store; inspect returned errors
+  _try_verify_ts "$new_sts" "$new_hash" "$certfile"
+  case "$?" in
+    0) # success
+      [ -n "$opt_verbose" ] && echo "$RET"
+      ;;
+
+    [345])
+      # 7b. fetch certificates from TSA and append to $certfile
+      _fetch_append_ts_certs "$certfile" || return
+      # try again
+      if _try_verify_ts "$new_sts" "$new_hash" "$certfile"; then
+        [ -n "$opt_verbose" ] && echo "$RET"
+      else
+        eval echo "Verify error: \$err_verify_$?"
+        return 1
+      fi
+      ;;
+
+    *)
+      eval echo "Verify error: \$err_verify_$?"
+      return 1
+      ;;
+  esac
+
 
   # 8. append to log
   _append_tsalog "$file" "$new_size" "$new_hash" "$new_sts" || return
 
-  echo "$file: processed"
+  echo "DONE: $file"
 }
 
-# returns 0/2...
-_verify() { # filename
-  local file=$1
+_do_verify() { # filename tempdir
+  local file=$1 tempdir=$2
+  local last_pos last_hash last_sts
+  local size
+  local certfile=$(_join_path "$(dirname -- "$file")" "$CERTFILE")
 
-  :   # FIXME TODO
+  if [ -n "$opt_all" ]; then
+    printf "%s:\n" "$file"
+
+    # _cb_verify_all expects $file $certfile $tempdir !
+    _read_tsalog "$file" _cb_verify_all || return
+
+    _size "$file" || return
+    echo "  $RET -- EOF --"
+    echo
+
+  else
+    _read_tsalog "$file" _cb_get_last || return
+    # _cb_get_last has populated $last_pos, $last_hash and $last_sts
+
+    _size "$file" || return
+    size=$RET
+
+    printf "%s: " "$file"
+    if [ "$size" -eq "$last_pos" ]; then
+      _verify_ts "$last_sts" "$file" "$certfile" "$tempdir" || return
+#      _verify_ts_audit "$last_sts" "$file" "$certfile" || return; RET=
+    else
+      _verify_ts "$last_sts" "$file" "$certfile" "$tempdir" "$last_pos" || return
+      echo "NOTE: $file has been appended to since last timestamp (size now $size vs. $last_pos)"
+    fi
+
+    _get_tsr_info "$last_sts" "$tempdir/out" "$tempdir/err" || return
+    if [ -n "$opt_verbose" ]; then
+      echo "$RET"
+      cat "$tempdir/out"
+    else
+      printf "%s, " "$RET"
+      grep "^Time stamp: " "$tempdir/out"
+    fi
+
+    echo
+  fi
+}
+
+# returns 0/1...
+_verify() { # filename
+  local tempdir rc
+
+  tempdir=$(mktemp -d) || return 1
+  _do_verify "$1" "$tempdir"
+  rc=$?
+  rm -r "$tempdir"
+  return $rc
 }
 
 case $OP in
@@ -210,6 +397,7 @@ case $OP in
           echo "$file already exists" >&2
           error=1
         fi
+
       elif [ -e "$file$SUFFIX" ]; then
         echo "$file$SUFFIX already exists" >&2
       fi
@@ -234,10 +422,18 @@ case $OP in
         echo "SKIP: $file does not exist" >&2
         error=1
         continue
+
       elif [ ! -f "$file$SUFFIX" ]; then
-        echo "SKIP: $file$SUFFIX does not exist (not initialized?)" >&2
-        error=1
-        continue
+        base=${file%$SUFFIX}
+        if [ "$base" = "$file" ] || [ ! -f "$base" ]; then
+          echo "SKIP: $file$SUFFIX does not exist (not initialized?)" >&2
+          error=1
+          continue
+        fi
+
+        # when $file ends with $SUFFIX and $file w/o $SUFFIX exists, use that
+        # (useful for: tsatool *.tsalog)
+        file=$base
       fi
 
       _update "$file" || error=1
@@ -249,13 +445,19 @@ case $OP in
     error=
     for file; do
       if [ ! -f "$file" ]; then
-        echo "ERROR: $file does not exist" >&2
+        echo "ERROR: $file does not exist / is not a file" >&2
         error=1
         continue
+
       elif [ ! -f "$file$SUFFIX" ]; then
-        echo "ERROR: $file$SUFFIX does not exist" >&2
-        error=1
-        continue
+        base=${file%$SUFFIX}
+        if [ "$base" = "$file" ] || [ ! -f "$base" ]; then
+          echo "ERROR: $file$SUFFIX does not exist" >&2
+          error=1
+          continue
+        fi
+
+        file=$base
       fi
 
       _verify "$file" || exit
