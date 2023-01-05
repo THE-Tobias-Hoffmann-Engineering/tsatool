@@ -24,8 +24,12 @@ Configuration variables in `tsatool` executable:
 * `DIGEST`: Digest used in timestamp and for hashing files (usually `sha384`)
 * `SUFFIX`: `$filename$SUFFIX` is where the timestamps are stored (usually `.tsalog`)
 
+Alternatively, when a `.tsaconfig` file exists in the current directory, or any of its parents,
+it's settings (`KEY=VALUE`-lines, no quotes!) override the defaults from the executable.  
+When `CERTFILE` is specified there, it is treated relatively to found config file.
+
 Requires:
-* posix shell (`/bin/sh`), getopt, wc, cut, head (-c), mktemp, /dev/stdin, grep, cat
+* posix shell (`/bin/sh`) w/ local, getopt, wc, cut, head (-c), mktemp, dirname, (/dev/stdin,) grep, cat
 * openssl
 * curl
 

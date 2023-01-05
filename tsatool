@@ -5,6 +5,8 @@ CERTFILE="tsa-certificates.crt"
 DIGEST="sha384"
 SUFFIX=".tsalog"
 
+CFGFILE=".tsaconfig"
+
 case "$1" in
   "init")
     shift
@@ -44,6 +46,40 @@ Usage: $0 ...
 EOT
   exit
 fi
+
+_find_config() { # absPath cfgName
+  local dir=$1 name=$2
+  while
+    if [ -e "$dir/$name" ]; then
+      RET="$dir/$name"
+      return
+    fi
+    [ "$dir" != "/" ]
+  do
+    dir=$(dirname -- "$dir")
+  done
+  RET=
+  return 1
+}
+
+_load_config() { # filename nameWhitelist....
+  local file=$1
+  local key val k
+  while IFS="=" read -r key val; do
+    key=${key#"${key%%[! ]*}"}  # strip leading whitespace
+    if [ -z "$key" ] || [ "${key###}" != "$key" ]; then
+      continue
+    fi
+
+    for k; do
+      if [ "$k" = "$key" ]; then
+        eval "$key=\$val"
+        continue 2
+      fi
+    done
+    echo "Ignoring unsupported config variable $key" >&2
+  done < "$file"
+}
 
 _join_path() { # path0 path1
   case "$2" in
@@ -229,7 +265,9 @@ _cb_verify_all() { # pos hash sts   (global: file certfile tempdir)
 
 #  _verify_ts "$sts" "$file" "$certfile" "$tempdir" "$pos" || return
   _digest "$file" "$pos" || return
-  if _do_try_verify_ts "$sts" "$RET" "$certfile" "$tempdir"; then :; else
+  if _do_try_verify_ts "$sts" "$RET" "$certfile" "$tempdir"; then
+    printf "OK, "
+  else
     eval echo "FAIL: \$err_verify_$?"
     return 1
   fi
@@ -387,6 +425,18 @@ _verify() { # filename
   rm -r "$tempdir"
   return $rc
 }
+
+if [ -n "CFGFILE" ]; then
+  tmp=$CERTFILE
+  CERTFILE=
+  _find_config "$PWD" "$CFGFILE" && _load_config "$RET" TSA_URL CERTFILE DIGEST SUFFIX
+  if [ -n "$CERTFILE" ]; then
+    # when CERTFILE comes from config file, it's relative to the config file -> convert to absolute path
+    CERTFILE=$(_join_path "$(dirname -- "$RET")" "$CERTFILE")
+  else
+    CERTFILE=$tmp
+  fi
+fi
 
 case $OP in
   init)
