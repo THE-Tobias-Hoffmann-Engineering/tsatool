@@ -1,6 +1,7 @@
 #!/bin/sh
 
 TSA_URL=""
+TSA_DELAY=0
 CERTFILE="tsa-certificates.crt"
 DIGEST="sha384"
 SUFFIX=".tsalog"
@@ -108,11 +109,26 @@ _digest() { # filename [limit=]
   RET=$(openssl "$DIGEST" -r < "$1" | cut -d' ' -f1)
 }
 
+last_tsa_request=
+_tsadelay() {
+  local now delay
+  [ "${TSA_DELAY:-0}" -gt 0 ] || return 0
+
+  now=$(date +%s)
+  delay=$(( $TSA_DELAY - ($now - ${last_tsa_request:-0}) ))
+  if [ $delay -gt 0 ]; then
+    [ -n "$opt_verbose" ] && echo "Enforcing TSA_DELAY = $TSA_DELAY: sleeping $delay seconds"
+    sleep "$delay"
+  fi
+  last_tsa_request=$now
+}
+
 # returns 0/1, RET=signedTimestamp(base64)
 _obtain_ts() { # digestOfData
   local tempfile
   tempfile=$(mktemp) || return
   openssl ts -query "-$DIGEST" -digest "$1" -no_nonce -out "$tempfile" || { rm "$tempfile"; return 1; }
+  _tsadelay
   curl -s -S -H 'Content-type: application/timestamp-query' --data-binary "@$tempfile" "$TSA_URL" -o "$tempfile" || { rm "$tempfile"; return 1; }
   openssl ts -reply -in "$tempfile" -token_out -out "$tempfile" || { rm "$tempfile"; return 1; }
   RET=$(openssl base64 -A -in "$tempfile")
@@ -125,6 +141,7 @@ _do_fetch_ts_certs() { # dstfile
   local dstfile=$1
   # obtain "empty" timestamp, but with included certs
   printf "" | openssl ts -query "-$DIGEST" -cert -no_nonce -out "$dstfile" || return
+  _tsadelay
   curl -s -S -H 'Content-type: application/timestamp-query' --data-binary "@$dstfile" "$TSA_URL" -o "$dstfile" || return
   openssl ts -reply -in "$dstfile" -token_out -out "$dstfile" || return
   RET=$(openssl ts -reply -token_in -in "$dstfile" -text | grep "^TSA: ")

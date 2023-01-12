@@ -20,6 +20,7 @@ This allows e.g. `tsatool *.tsalog`.
 
 Configuration variables in `tsatool` executable:
 * `TSA_URL`: Trusted timestamping server
+* `TSA_DELAY`: Wait at least this many seconds between server requests.
 * `CERTFILE`: Local copy of all used Root CA and TSA certificates, relative to `FILENAME` (usually `tsa-certificates.crt`); automatically extended with received TSA certificates.
 * `DIGEST`: Digest used in timestamp and for hashing files (usually `sha384`)
 * `SUFFIX`: `$filename$SUFFIX` is where the timestamps are stored (usually `.tsalog`)
@@ -30,6 +31,7 @@ When `CERTFILE` is specified there, it is treated relatively to found config fil
 
 Requires:
 * posix shell (`/bin/sh`) w/ local, getopt, wc, cut, head (-c), mktemp, dirname, (/dev/stdin,) grep, cat
+* date, sleep (when `TSA_DELAY > 0`)
 * openssl
 * curl
 
