@@ -120,12 +120,14 @@ _obtain_ts() { # digestOfData
 }
 
 # Expects all timestamps from this TSA_URL to use the same certificates...
+# RET=TS authority name
 _do_fetch_ts_certs() { # dstfile
   local dstfile=$1
   # obtain "empty" timestamp, but with included certs
   printf "" | openssl ts -query "-$DIGEST" -cert -no_nonce -out "$dstfile" || return
   curl -s -S -H 'Content-type: application/timestamp-query' --data-binary "@$dstfile" "$TSA_URL" -o "$dstfile" || return
   openssl ts -reply -in "$dstfile" -token_out -out "$dstfile" || return
+  RET=$(openssl ts -reply -token_in -in "$dstfile" -text | grep "^TSA: ")
   openssl pkcs7 -inform DER -in "$dstfile" -print_certs -out "$dstfile" || return
 }
 
@@ -136,6 +138,7 @@ _fetch_append_ts_certs() { # certfile
   _do_fetch_ts_certs "$tempfile"
   rc=$?
   if [ "$rc" -eq 0 ]; then
+    echo "Appending to $certfile certificates for $RET"
     cat "$tempfile" >> "$certfile"
   fi
   rm "$tempfile"
@@ -444,12 +447,12 @@ case $OP in
     for file; do
       if [ -e "$file" ]; then
         if [ -z "$opt_force" ]; then
-          echo "$file already exists" >&2
+          echo "ERROR: $file already exists" >&2
           error=1
         fi
 
       elif [ -e "$file$SUFFIX" ]; then
-        echo "$file$SUFFIX already exists" >&2
+        echo "ERROR: $file$SUFFIX already exists" >&2
       fi
     done
 
