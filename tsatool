@@ -449,7 +449,7 @@ _verify() { # filename
 if [ -n "CFGFILE" ]; then
   tmp=$CERTFILE
   CERTFILE=
-  _find_config "$PWD" "$CFGFILE" && _load_config "$RET" TSA_URL CERTFILE DIGEST SUFFIX
+  _find_config "$PWD" "$CFGFILE" && _load_config "$RET" TSA_URL TSA_DELAY CERTFILE DIGEST SUFFIX
   if [ -n "$CERTFILE" ]; then
     # when CERTFILE comes from config file, it's relative to the config file -> convert to absolute path
     CERTFILE=$(_join_path "$(dirname -- "$RET")" "$CERTFILE")
@@ -470,6 +470,7 @@ case $OP in
 
       elif [ -e "$file$SUFFIX" ]; then
         echo "ERROR: $file$SUFFIX already exists" >&2
+        error=1
       fi
     done
 
