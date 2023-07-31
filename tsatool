@@ -17,6 +17,10 @@ case "$1" in
     shift
     ARGS=$(getopt "ah" $*) && OP=verify
     ;;
+  "show-certs")
+    shift
+    ARGS=$(getopt "h" $*) && OP=show-certs
+    ;;
   "")
     ARGS=--
     ;;
@@ -44,6 +48,7 @@ Usage: $0 ...
           init [-f] NEW_FILENAME...
           FILENAME...
           verify [-a] FILENAME...
+          show-certs
 EOT
   exit
 fi
@@ -534,6 +539,13 @@ case $OP in
       _verify "$file" || exit
     done
     exit $error
+    ;;
+
+  show-certs)
+    echo "Certificates from: $CERTFILE"
+    echo
+    openssl crl2pkcs7 -nocrl -certfile "$CERTFILE" -outform DER | openssl pkcs7 -print_certs -inform DER -noout || exit 1
+    exit 0
     ;;
 esac
 
