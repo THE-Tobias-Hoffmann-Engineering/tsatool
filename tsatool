@@ -51,6 +51,9 @@ Usage: $0 ...
           show-certs
 EOT
   exit
+elif [ $# -eq 0 ]; then
+  echo "ERROR: Expected FILENAME"
+  exit 1
 fi
 
 _find_config() { # absPath cfgName
@@ -176,6 +179,7 @@ _get_tsr_info() { # signedTimestamp(base64) dstfile errfile
 # returns 0/1, RET=output
 _verify_ts() { # signedTimestamp(base64) datafile certfile tempdir [limit=]
   local sts=$1 file=$2 certfile=$3 tempdir=$4 limit=$5
+  local rc
 
   echo "$sts" | openssl base64 -A -d -out "$tempdir/in" || return
 
@@ -187,7 +191,7 @@ _verify_ts() { # signedTimestamp(base64) datafile certfile tempdir [limit=]
     RET=$(openssl ts -verify -data "$file" -token_in -in "$tempdir/in" -CAfile "$certfile" -untrusted "$certfile" 2> "$tempdir/err")
     rc=$?
   fi
-  grep -v "^Using configuration from" "$tempdir/err" >&2
+  grep -v "^Using configuration from\|^Warning: certificate from .* is not a CA cert" "$tempdir/err" >&2
 
   return $rc
 }

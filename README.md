@@ -15,7 +15,7 @@ tsatool verify [-a] FILENAME...
   -a: Check all intermediate hashes + timestamps, not just the final one.
 ```
 
-When `FILENAME` already ends in `$SUFFIX` and the base file without the suffix exists, it is used insted.
+When `FILENAME` already ends in `$SUFFIX` and the base file without the suffix exists, it is used instead.
 This allows e.g. `tsatool *.tsalog`.
 
 Configuration variables in `tsatool` executable:
