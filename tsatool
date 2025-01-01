@@ -410,10 +410,11 @@ _do_verify() { # filename tempdir
 
     # _cb_verify_all expects $file $certfile $tempdir !
     _read_tsalog "$file" _cb_verify_all || return
+    # _cb_verify_all has populated $last_pos
 
     _size "$file" || return
-    echo "  $RET -- EOF --"
-    echo
+    size=$RET
+    echo "  $size -- EOF --"
 
   else
     _read_tsalog "$file" _cb_get_last || return
@@ -428,7 +429,6 @@ _do_verify() { # filename tempdir
 #      _verify_ts_audit "$last_sts" "$file" "$certfile" || return; RET=
     else
       _verify_ts "$last_sts" "$file" "$certfile" "$tempdir" "$last_pos" || return
-      echo "NOTE: $file has been appended to since last timestamp (size now $size vs. $last_pos)"
     fi
 
     _get_tsr_info "$last_sts" "$tempdir/out" "$tempdir/err" || return
@@ -439,9 +439,13 @@ _do_verify() { # filename tempdir
       printf "%s, " "$RET"
       grep "^Time stamp: " "$tempdir/out"
     fi
-
-    echo
   fi
+
+  if [ "$size" -ne "$last_pos" ]; then
+    echo "NOTE: $file has been appended to since last timestamp (size now $size vs. $last_pos)"
+  fi
+
+  echo
 }
 
 # returns 0/1...
