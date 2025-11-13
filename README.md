@@ -11,8 +11,9 @@ tsatool FILENAME...
   When no data is added, no new record is created
   (the file's completeness is still checked against the last record, though).
 
-tsatool verify [-a] FILENAME...
+tsatool verify [-av] FILENAME...
   -a: Check all intermediate hashes + timestamps, not just the final one.
+  -v: Verbose, esp. w/ -a: Show file content slices.
 ```
 
 When `FILENAME` already ends in `$SUFFIX` and the base file without the suffix exists, it is used instead.

@@ -15,7 +15,7 @@ case "$1" in
     ;;
   "verify")
     shift
-    ARGS=$(getopt "ah" $*) && OP=verify
+    ARGS=$(getopt "avh" $*) && OP=verify
     ;;
   "show-certs")
     shift
@@ -32,11 +32,12 @@ set -- $ARGS
 
 opt_all=
 opt_force=
-opt_verbose=   # TODO?!
+opt_verbose=
 while :; do
   case "$1" in
     -a) opt_all=1; shift ;;
     -f) opt_force=1; shift ;;
+    -v) opt_verbose=1; shift ;;
     -h) OP=; shift; break ;;
     --) shift; break ;;
   esac
@@ -47,7 +48,7 @@ if [ -z "$OP" ]; then
 Usage: $0 ...
           init [-f] NEW_FILENAME...
           FILENAME...
-          verify [-a] FILENAME...
+          verify [-av] FILENAME...
           show-certs
 EOT
   exit
@@ -106,6 +107,10 @@ _head() { # file limit
   # some implementations don't like 0
   [ "$2" -eq 0 ] && return
   head -c "$2" "$1"
+}
+
+_subrange() { # file from [to=]
+  dd if="$1" status=none bs=1 skip="$2" ${3:+count="$(expr "$3" - "$2")"}
 }
 
 # RET=digest
@@ -288,6 +293,12 @@ _cb_get_last() { # pos hash sts
 
 _cb_verify_all() { # pos hash sts   (global: file certfile tempdir)
   local pos=$1 hash=$2 sts=$3
+
+  if [ -n "$opt_verbose" ] && [ -n "$last_pos" ]; then
+    tput setaf 8 2>/dev/null || echo "--"
+    _subrange "$file" "$last_pos" "$pos"
+    tput sgr0 2>/dev/null
+  fi
   last_pos=$pos   # store for final append check
 
   printf "  %s: " "$pos"
