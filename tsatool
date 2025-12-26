@@ -282,6 +282,15 @@ _append_tsalog() { # filename pos hash signedTimestamp(base64)
   fi
 }
 
+_show_subrange() { # file from to
+  if [ "$2" -eq "$3" ]; then
+    return
+  fi
+  tput setaf 8 2>/dev/null || echo "--"
+  _subrange "$1" "$2" "$3"
+  tput sgr0 2>/dev/null
+}
+
 last_pos=
 last_hash=
 last_sts=
@@ -294,10 +303,8 @@ _cb_get_last() { # pos hash sts
 _cb_verify_all() { # pos hash sts   (global: file certfile tempdir)
   local pos=$1 hash=$2 sts=$3
 
-  if [ -n "$opt_verbose" ] && [ -n "$last_pos" ]; then
-    tput setaf 8 2>/dev/null || echo "--"
-    _subrange "$file" "$last_pos" "$pos"
-    tput sgr0 2>/dev/null
+  if [ -n "$opt_verbose" ]; then
+    _show_subrange "$file" "${last_pos:-0}" "$pos"
   fi
   last_pos=$pos   # store for final append check
 
@@ -425,6 +432,10 @@ _do_verify() { # filename tempdir
 
     _size "$file" || return
     size=$RET
+
+    if [ -n "$opt_verbose" ]; then
+      _show_subrange "$file" "${last_pos:-0}" "$size"
+    fi
     echo "  $size -- EOF --"
 
   else
